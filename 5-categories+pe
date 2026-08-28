@@ -1,0 +1,62 @@
+# ------------------------------------------------------------------
+# Liability-to-observed scale variance conversion for ordinal traits
+# Polychotomous slope method: Gianola (1979), Genetics 93:1051-1055
+# PE / repeatability extension follows the logic of Rutledge (1977),
+# Biometrics 33:395-399 (repeatability of threshold traits), applied
+# to the polychotomous case: b depends only on thresholds and codes,
+# so each liability variance ratio maps to the observed scale as
+# b^2 * (sigma2_i / sigma2_total).
+# ------------------------------------------------------------------
+
+ordinal_convert <- function(counts, sigma2_a, sigma2_e, sigma2_pe = 0,
+                            codes = NULL) {
+  props <- counts / sum(counts)
+  K <- length(props)
+  if (is.null(codes)) codes <- 1:K
+
+  # thresholds from cumulative category proportions
+  cum_props <- cumsum(props)
+  taus <- c(-Inf, qnorm(cum_props[-K]), Inf)
+
+  # observed-scale mean and variance of the coded score
+  muY  <- sum(props * codes)
+  varY <- sum(props * (codes - muY)^2)
+
+  # slope of observed score on standardized liability
+  phi_vals <- dnorm(taus)                 # 0 at -Inf and Inf
+  b <- sum((codes - muY) * (phi_vals[-length(phi_vals)] - phi_vals[-1]))
+
+  # liability-scale ratios
+  tot   <- sigma2_a + sigma2_pe + sigma2_e
+  h2_L  <- sigma2_a / tot
+  pe_L  <- sigma2_pe / tot
+  rep_L <- (sigma2_a + sigma2_pe) / tot   # repeatability, liability scale
+
+  # observed-scale components
+  Va_obs  <- b^2 * h2_L
+  Vpe_obs <- b^2 * pe_L
+  Ve_obs  <- varY - Va_obs - Vpe_obs
+  h2_obs  <- Va_obs / varY
+  rep_obs <- (Va_obs + Vpe_obs) / varY
+
+  list(
+    thresholds = taus[2:K],
+    muY = muY, varY = varY, b = b,
+    Va_obs = Va_obs, Vpe_obs = Vpe_obs, Ve_obs = Ve_obs,
+    h2_L = h2_L, rep_L = rep_L, h2_obs = h2_obs, rep_obs = rep_obs,
+    residual_breakdown = c(
+      temp_env_from_liability = b^2 * (1 - rep_L),
+      discretization_noise    = varY - b^2
+    )
+  )
+}
+
+# ---- inputs ------------------------------------------------------
+counts    <- c(193, 325, 618, 1404, 47665)   # categories 1..5
+sigma2_a  <- 0.54
+sigma2_pe <- 0.20
+sigma2_e  <- 1.10
+
+# ---- run ---------------------------------------------------------
+res <- ordinal_convert(counts, sigma2_a, sigma2_e, sigma2_pe, codes = 1:5)
+res
