@@ -1,0 +1,171 @@
+# ==================================================================
+# GEBV comparison: linear vs threshold models, polychotomous traits
+# AP2 generalized to K categories:
+#   binary AP2 (de Oliveira Padilha et al., 2026): GEBV_l = GEBV_o / z
+#   polychotomous: GEBV_l = GEBV_o / b, where b is the slope of the
+#   observed score on standardized liability (Gianola, 1979):
+#   b = sum_k (c_k - muY) * [phi(tau_{k-1}) - phi(tau_k)]
+#   For K = 2, b reduces to z = dnorm(threshold).
+# Probability scale (Gianola & Foulley, 1983): per-category
+#   P_k = pnorm(tau_k - u) - pnorm(tau_{k-1} - u)
+# ==================================================================
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+
+# ---- polychotomous AP2 helpers -----------------------------------
+poly_params <- function(counts, codes = NULL) {
+  props <- counts / sum(counts)
+  K <- length(props)
+  if (is.null(codes)) codes <- 1:K
+  taus  <- qnorm(cumsum(props)[-K])            # K-1 finite thresholds
+  phi_v <- dnorm(c(-Inf, taus, Inf))
+  muY   <- sum(props * codes)
+  b     <- sum((codes - muY) * (phi_v[-length(phi_v)] - phi_v[-1]))
+  list(taus = taus, b = b, muY = muY, K = K, codes = codes)
+}
+
+# per-category probabilities from liability-scale GEBV
+cat_probs <- function(u, taus) {
+  bounds <- c(-Inf, taus, Inf)
+  sapply(seq_len(length(bounds) - 1), function(k)
+    pnorm(bounds[k + 1] - u) - pnorm(bounds[k] - u))
+}
+
+# expected score E[Y|u] = sum_k c_k * P_k
+expected_score <- function(u, taus, codes) {
+  P <- cat_probs(u, taus)
+  as.vector(P %*% codes)
+}
+
+# ---- per-trait analysis ------------------------------------------
+run_trait <- function(dir, linear_file, threshold_file, counts,
+                      renadd_l_file = "renadd02_L.ped",
+                      renadd_t_file = "renadd02_T.ped",
+                      codes = NULL, trait_name = basename(dir)) {
+
+  setwd(dir)
+  pp <- poly_params(counts, codes)
+
+  # Step 1: load solutions and renadd
+  lin <- read_table(linear_file)    %>% filter(effect == 2)
+  thr <- read_table(threshold_file) %>% filter(effect == 2)
+
+  renadd_l <- read.table(renadd_l_file)[, c(1, ncol(read.table(renadd_l_file)))]
+  renadd_t <- read.table(renadd_t_file)[, c(1, ncol(read.table(renadd_t_file)))]
+  colnames(renadd_l) <- colnames(renadd_t) <- c("level", "ID")
+
+  # Step 2: merge to original IDs
+  merged <- merge(merge(renadd_l, lin, by = "level"),
+                  merge(renadd_t, thr, by = "level"),
+                  by = "ID", suffixes = c("_linear", "_threshold"))
+
+  # Step 3: AP2 polychotomous — observed to liability scale
+  merged$gebv_liab_ap2 <- merged$solution_linear / pp$b
+
+  # Step 4: probability of best category (score 1) and expected score
+  merged$prob1_linear    <- pnorm(pp$taus[1] - merged$gebv_liab_ap2)
+  merged$prob1_threshold <- pnorm(pp$taus[1] - merged$solution_threshold)
+  merged$escore_linear    <- expected_score(merged$gebv_liab_ap2,
+                                            pp$taus, pp$codes)
+  merged$escore_threshold <- expected_score(merged$solution_threshold,
+                                            pp$taus, pp$codes)
+
+  # Step 5: correlations and regression
+  cor_ranko <- cor(merged$solution_linear, merged$solution_threshold,
+                   method = "spearman")
+  cor_rankl <- cor(merged$gebv_liab_ap2, merged$solution_threshold,
+                   method = "spearman")
+  cor_rankp <- cor(merged$prob1_linear, merged$prob1_threshold,
+                   method = "spearman")
+  cor_ranke <- cor(merged$escore_linear, merged$escore_threshold,
+                   method = "spearman")
+  lm_fit <- lm(prob1_threshold ~ prob1_linear, data = merged)
+
+  cat("Trait:", trait_name, "\n")
+  cat("Category proportions:", round(counts / sum(counts), 4), "\n")
+  cat("Thresholds:", round(pp$taus, 4), "\n")
+  cat("Slope b:", round(pp$b, 4), "\n")
+  cat("Spearman observed vs threshold:", round(cor_ranko, 4), "\n")
+  cat("Spearman liability(AP2) vs threshold:", round(cor_rankl, 4), "\n")
+  cat("Spearman P(cat 1) linear vs threshold:", round(cor_rankp, 4), "\n")
+  cat("Spearman expected score linear vs threshold:", round(cor_ranke, 4), "\n")
+  cat("Regression intercept:", round(coef(lm_fit)[1], 4), "\n")
+  cat("Regression slope:", round(coef(lm_fit)[2], 4), "\n\n")
+
+  # Step 6: plots
+  p1 <- ggplot(merged, aes(x = prob1_linear, y = prob1_threshold)) +
+    geom_point(alpha = 0.4) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+                color = "gray40") +
+    geom_smooth(method = "lm", color = "blue") +
+    labs(x = "Linear Model (AP2, Probability of Category 1)",
+         y = "Threshold Model (Probability of Category 1)",
+         caption = paste0("Spearman r = ", round(cor_rankp, 3))) +
+    theme_classic()
+
+  p2 <- ggplot(merged, aes(x = gebv_liab_ap2, y = solution_threshold)) +
+    geom_point(alpha = 0.4) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+                color = "gray40") +
+    geom_smooth(method = "lm", color = "darkgreen") +
+    labs(x = "Linear Model (AP2, Liability Scale)",
+         y = "Threshold Model (Liability Scale)",
+         caption = paste0("Spearman r = ", round(cor_rankl, 3))) +
+    theme_classic()
+
+  plot_df <- merged %>%
+    transmute(`Observed (Linear)`     = solution_linear,
+              `Liability (Linear)`    = gebv_liab_ap2,
+              `Liability (Threshold)` = solution_threshold) %>%
+    pivot_longer(everything(), names_to = "Scale", values_to = "Value")
+
+  p3 <- ggplot(plot_df, aes(x = Value, fill = Scale, color = Scale)) +
+    geom_density(alpha = 0.5, linewidth = 1) +
+    scale_fill_manual(values = c(
+      "Observed (Linear)"     = "#8da0cb",
+      "Liability (Linear)"    = "#fc8d62",
+      "Liability (Threshold)" = "#66c2a5")) +
+    scale_color_manual(values = c(
+      "Observed (Linear)"     = "#8da0cb",
+      "Liability (Linear)"    = "#fc8d62",
+      "Liability (Threshold)" = "#66c2a5")) +
+    labs(x = "Estimated Breeding Value", y = "Density",
+         fill = "Scale", color = "Scale") +
+    theme_classic(base_size = 14)
+
+  w <- 7; h <- 6; dpi <- 600
+  ggsave("scatter_prob_scale.tiff", p1, width = w, height = h, dpi = dpi,
+         compression = "lzw", bg = "transparent")
+  ggsave("scatter_liab_scale.tiff", p2, width = w, height = h, dpi = dpi,
+         compression = "lzw", bg = "transparent")
+  ggsave("density_liab_scale.tiff", p3, width = w, height = h, dpi = dpi,
+         compression = "lzw", bg = "transparent")
+
+  invisible(merged)
+}
+
+# ==================================================================
+# Run per trait — replace counts with the category counts (1..5)
+# from the data used in each analysis
+# ==================================================================
+base <- "/Users/milenacampos/Documents/GEBVS_correlations_copy"
+
+navel <- run_trait(
+  dir            = file.path(base, "navel"),
+  linear_file    = "navel_Linear.txt",
+  threshold_file = "navel_threshold.txt",
+  counts         = c(193, 325, 618, 1404, 47665)
+)
+
+# aprumos example without renadd (merge by level directly): if a trait
+# was run without renumbered ID mapping, pass the same renadd files
+# used by both models or adapt as in your binary script.
+# aprumos <- run_trait(
+#   dir            = file.path(base, "aprumos"),
+#   linear_file    = "aprumos_Linear.txt",
+#   threshold_file = "aprumos_threshold.txt",
+#   counts         = c(n1, n2, n3, n4, n5)
+# )
