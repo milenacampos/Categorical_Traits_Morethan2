@@ -1,0 +1,357 @@
+# ============================================================
+# POLYCHOTOMOUS THRESHOLD MODEL
+# Liability -> observed scale transformation
+#
+# Model:
+#   Random CG + additive animal + residual
+#
+# postgibbs position:
+#   Pos 1 = CG variance
+#   Pos 2 = additive genetic variance
+#   Pos 3 = residual variance
+# ============================================================
+
+
+# ------------------------------------------------------------
+# 1. CATEGORY INFORMATION
+# ------------------------------------------------------------
+
+counts <- c(65, 372, 951, 1110, 4459)
+codes  <- 1:5
+
+props <- counts / sum(counts)
+K <- length(props)
+
+# Thresholds based on observed category frequencies
+taus <- qnorm(cumsum(props)[-K])
+
+# Normal densities at boundaries
+phi_v <- dnorm(c(-Inf, taus, Inf))
+
+# Mean of observed categorical phenotype
+muY <- sum(props * codes)
+
+# Gianola polychotomous transformation coefficient
+b <- sum(
+  (codes - muY) *
+    (phi_v[-length(phi_v)] - phi_v[-1])
+)
+
+b2 <- b^2
+
+# Observed phenotypic variance
+sigma2_y_obs <- sum(props * (codes - muY)^2)
+
+# Factor converting liability heritability to observed heritability
+h2_scale <- b2 / sigma2_y_obs
+
+
+# ------------------------------------------------------------
+# 2. READ JOINT POSTERIOR GIBBS SAMPLES
+# ------------------------------------------------------------
+
+gibbs <- read.table(
+  "postgibbs_samples",
+  header = FALSE
+)
+
+# First 3 columns:
+# V1 = sample number
+# V2 = Gibbs iteration
+# V3 = number of parameters
+#
+# From column 4 onward: sampled parameters in PostGibbs
+# position order.
+#
+# For your model:
+# position 1 = CG
+# position 2 = additive genetic
+# position 3 = residual
+
+gibbs$var_cg <- gibbs[, 4]
+gibbs$var_a  <- gibbs[, 5]
+gibbs$var_e  <- gibbs[, 6]
+
+
+# ------------------------------------------------------------
+# 3. LIABILITY-SCALE COMPONENTS
+# ------------------------------------------------------------
+
+# Total liability variance for EACH Gibbs sample
+gibbs$var_total_liab <-
+  gibbs$var_a +
+  gibbs$var_cg +
+  gibbs$var_e
+
+
+# Proportion attributable to additive genetics
+gibbs$h2_liab <-
+  gibbs$var_a / gibbs$var_total_liab
+
+
+# Proportion attributable to contemporary group
+gibbs$cg_ratio_liab <-
+  gibbs$var_cg / gibbs$var_total_liab
+
+
+# Proportion attributable to residual
+gibbs$e_ratio_liab <-
+  gibbs$var_e / gibbs$var_total_liab
+
+
+# Check
+gibbs$check_liab <-
+  gibbs$h2_liab +
+  gibbs$cg_ratio_liab +
+  gibbs$e_ratio_liab
+
+
+# ------------------------------------------------------------
+# 4. OBSERVED-SCALE VARIANCE COMPONENTS
+# ------------------------------------------------------------
+#
+# b was calculated for standardized liability.
+# Therefore each liability component is first expressed
+# relative to total liability variance.
+#
+# Additive observed variance:
+#   sigma_A(obs)^2 = b^2 * sigma_A^2 / sigma_P(liab)^2
+#
+# CG observed variance:
+#   sigma_CG(obs)^2 = b^2 * sigma_CG^2 / sigma_P(liab)^2
+#
+# The observed residual is obtained by subtraction so that
+# all components sum to the actual categorical phenotypic
+# variance.
+
+
+gibbs$var_a_obs <-
+  b2 * gibbs$var_a / gibbs$var_total_liab
+
+gibbs$var_cg_obs <-
+  b2 * gibbs$var_cg / gibbs$var_total_liab
+
+gibbs$var_e_obs <-
+  sigma2_y_obs -
+  gibbs$var_a_obs -
+  gibbs$var_cg_obs
+
+
+# Total observed phenotypic variance
+gibbs$var_total_obs <-
+  gibbs$var_a_obs +
+  gibbs$var_cg_obs +
+  gibbs$var_e_obs
+
+
+# ------------------------------------------------------------
+# 5. OBSERVED-SCALE RATIOS
+# ------------------------------------------------------------
+
+gibbs$h2_obs <-
+  gibbs$var_a_obs / sigma2_y_obs
+
+gibbs$cg_ratio_obs <-
+  gibbs$var_cg_obs / sigma2_y_obs
+
+gibbs$e_ratio_obs <-
+  gibbs$var_e_obs / sigma2_y_obs
+
+
+# Same h2_obs can also be calculated as:
+gibbs$h2_obs_check <-
+  gibbs$h2_liab * h2_scale
+
+
+# ------------------------------------------------------------
+# 6. FUNCTION TO CALCULATE 95% HPD
+# ------------------------------------------------------------
+
+HPD <- function(x, prob = 0.95) {
+
+  x <- sort(x[is.finite(x)])
+
+  n <- length(x)
+  m <- floor(prob * n)
+
+  widths <-
+    x[(m + 1):n] -
+    x[1:(n - m)]
+
+  j <- which.min(widths)
+
+  c(
+    lower = x[j],
+    upper = x[j + m]
+  )
+}
+
+
+# ------------------------------------------------------------
+# 7. SUMMARY FUNCTION
+# ------------------------------------------------------------
+
+posterior_summary <- function(x) {
+
+  hp <- HPD(x)
+
+  c(
+    Mean   = mean(x, na.rm = TRUE),
+    Median = median(x, na.rm = TRUE),
+    HPD_L  = hp["lower"],
+    HPD_U  = hp["upper"]
+  )
+}
+
+
+# ------------------------------------------------------------
+# 8. LIABILITY-SCALE RESULTS
+# ------------------------------------------------------------
+
+liability_results <- rbind(
+
+  Additive_variance =
+    posterior_summary(gibbs$var_a),
+
+  CG_variance =
+    posterior_summary(gibbs$var_cg),
+
+  Residual_variance =
+    posterior_summary(gibbs$var_e),
+
+  Total_variance =
+    posterior_summary(gibbs$var_total_liab),
+
+  Heritability =
+    posterior_summary(gibbs$h2_liab),
+
+  CG_proportion =
+    posterior_summary(gibbs$cg_ratio_liab),
+
+  Residual_proportion =
+    posterior_summary(gibbs$e_ratio_liab)
+)
+
+
+# ------------------------------------------------------------
+# 9. OBSERVED-SCALE RESULTS
+# ------------------------------------------------------------
+
+observed_results <- rbind(
+
+  Additive_variance =
+    posterior_summary(gibbs$var_a_obs),
+
+  CG_variance =
+    posterior_summary(gibbs$var_cg_obs),
+
+  Residual_variance =
+    posterior_summary(gibbs$var_e_obs),
+
+  Total_variance =
+    posterior_summary(gibbs$var_total_obs),
+
+  Heritability =
+    posterior_summary(gibbs$h2_obs),
+
+  CG_proportion =
+    posterior_summary(gibbs$cg_ratio_obs),
+
+  Residual_proportion =
+    posterior_summary(gibbs$e_ratio_obs)
+)
+
+
+# ------------------------------------------------------------
+# 10. PRINT TRANSFORMATION INFORMATION
+# ------------------------------------------------------------
+
+cat("\n====================================================\n")
+cat(" POLYCHOTOMOUS TRANSFORMATION\n")
+cat("====================================================\n\n")
+
+cat(
+  sprintf(
+    "Category proportions: %s\n",
+    paste(round(props, 6), collapse = ", ")
+  )
+)
+
+cat(
+  sprintf(
+    "Thresholds: %s\n",
+    paste(round(taus, 6), collapse = ", ")
+  )
+)
+
+cat(sprintf("Observed mean: %.6f\n", muY))
+cat(sprintf("b: %.6f\n", b))
+cat(sprintf("b^2: %.6f\n", b2))
+cat(sprintf("Observed phenotypic variance: %.6f\n",
+            sigma2_y_obs))
+
+cat(sprintf(
+  "h2 liability -> observed scale factor: %.6f\n",
+  h2_scale
+))
+
+
+# ------------------------------------------------------------
+# 11. PRINT RESULTS
+# ------------------------------------------------------------
+
+cat("\n====================================================\n")
+cat(" LIABILITY-SCALE POSTERIOR RESULTS\n")
+cat("====================================================\n\n")
+
+print(
+  round(liability_results, 5)
+)
+
+
+cat("\n====================================================\n")
+cat(" OBSERVED-SCALE POSTERIOR RESULTS\n")
+cat("====================================================\n\n")
+
+print(
+  round(observed_results, 5)
+)
+
+
+# ------------------------------------------------------------
+# 12. INTERNAL CHECKS
+# ------------------------------------------------------------
+
+cat("\n====================================================\n")
+cat(" CHECKS\n")
+cat("====================================================\n\n")
+
+cat(sprintf(
+  "Mean liability component sum: %.8f\n",
+  mean(gibbs$check_liab)
+))
+
+cat(sprintf(
+  "Maximum |liability sum - 1|: %.10f\n",
+  max(abs(gibbs$check_liab - 1))
+))
+
+cat(sprintf(
+  "Mean observed total variance: %.8f\n",
+  mean(gibbs$var_total_obs)
+))
+
+cat(sprintf(
+  "Expected observed phenotypic variance: %.8f\n",
+  sigma2_y_obs
+))
+
+cat(sprintf(
+  "Maximum difference between the two h2_obs calculations: %.10f\n",
+  max(
+    abs(
+      gibbs$h2_obs -
+      gibbs$h2_obs_check
+    )
+  )
+))
