@@ -1,0 +1,605 @@
+# ======================================================================
+# ORDINAL THRESHOLD MODEL:
+# LIABILITY-TO-OBSERVED SCALE CONVERSION USING JOINT GIBBS SAMPLES
+#
+# Polychotomous transformation:
+#   Gianola (1979), Genetics 93:1051-1055
+#
+# Repeatability / permanent environmental extension:
+#   follows the threshold-trait logic of Rutledge (1977)
+#
+# IMPORTANT:
+#   Derived parameters are calculated WITHIN EACH Gibbs sample.
+#   Posterior means and HPD intervals are calculated only afterward.
+#
+# postgibbs_samples format:
+#   column 1 = saved sample number
+#   column 2 = Gibbs iteration
+#   column 3 = number of sampled parameters
+#   column 4 onward = variance components in postind order
+# ======================================================================
+
+
+# ======================================================================
+# 1. USER SETTINGS
+# ======================================================================
+
+POSTGIBBS_FILE <- "postgibbs_samples"
+
+# Category counts
+counts <- c(65, 372, 951, 1110, 4459)
+
+# Category codes
+codes <- 1:5
+
+
+# ----------------------------------------------------------------------
+# Columns in postgibbs_samples
+#
+# CURRENT RANDOM-CG MODEL:
+#   Position 1 = CG       -> column 4
+#   Position 2 = additive -> column 5
+#   Position 3 = residual -> column 6
+# ----------------------------------------------------------------------
+
+COL_CG <- 4
+COL_A  <- 5
+COL_PE <- NULL
+COL_E  <- 6
+
+
+# ----------------------------------------------------------------------
+# Fixed values
+#
+# Used only when the corresponding COL_* is NULL.
+# ----------------------------------------------------------------------
+
+FIXED_CG <- 0
+FIXED_PE <- 0
+FIXED_E  <- NULL
+
+
+# Probability for HPD interval
+HPD_PROB <- 0.95
+
+
+# ======================================================================
+# 2. FUNCTIONS
+# ======================================================================
+
+HPD_interval <- function(x, prob = 0.95) {
+
+  x <- sort(x[is.finite(x)])
+
+  n <- length(x)
+
+  if (n < 2) {
+    stop("Not enough posterior samples to calculate HPD interval.")
+  }
+
+  m <- floor(prob * n)
+
+  if (m < 1 || m >= n) {
+    stop("Invalid HPD probability for the available number of samples.")
+  }
+
+  widths <- x[(m + 1):n] - x[1:(n - m)]
+
+  j <- which.min(widths)
+
+  c(
+    HPD_L = x[j],
+    HPD_U = x[j + m]
+  )
+}
+
+
+posterior_summary <- function(x, prob = 0.95) {
+
+  x <- x[is.finite(x)]
+
+  hp <- HPD_interval(x, prob)
+
+  c(
+    Mean   = mean(x),
+    Median = median(x),
+    SD     = sd(x),
+    HPD_L  = unname(hp[1]),
+    HPD_U  = unname(hp[2])
+  )
+}
+
+
+get_component <- function(gibbs, col = NULL, fixed = 0) {
+
+  if (!is.null(col)) {
+
+    if (col > ncol(gibbs)) {
+      stop(
+        paste(
+          "Requested column",
+          col,
+          "but postgibbs_samples has only",
+          ncol(gibbs),
+          "columns."
+        )
+      )
+    }
+
+    return(gibbs[[col]])
+  }
+
+  if (is.null(fixed)) {
+    stop("A component has neither a Gibbs column nor a fixed value.")
+  }
+
+  rep(fixed, nrow(gibbs))
+}
+
+
+# ======================================================================
+# 3. READ JOINT POSTERIOR SAMPLES
+# ======================================================================
+
+gibbs <- read.table(
+  POSTGIBBS_FILE,
+  header = FALSE
+)
+
+if (ncol(gibbs) < 4) {
+  stop("postgibbs_samples does not contain sampled variance components.")
+}
+
+
+# ======================================================================
+# 4. LIABILITY-SCALE VARIANCE COMPONENTS
+# ======================================================================
+
+Va_L <- get_component(
+  gibbs,
+  col = COL_A
+)
+
+Vpe_L <- get_component(
+  gibbs,
+  col = COL_PE,
+  fixed = FIXED_PE
+)
+
+Vcg_L <- get_component(
+  gibbs,
+  col = COL_CG,
+  fixed = FIXED_CG
+)
+
+Ve_L <- get_component(
+  gibbs,
+  col = COL_E,
+  fixed = FIXED_E
+)
+
+
+# Total liability variance
+Vp_L <- Va_L + Vpe_L + Vcg_L + Ve_L
+
+
+# ======================================================================
+# 5. LIABILITY-SCALE RATIOS
+# ======================================================================
+
+h2_L <- Va_L / Vp_L
+
+pe_ratio_L <- Vpe_L / Vp_L
+
+cg_ratio_L <- Vcg_L / Vp_L
+
+e_ratio_L <- Ve_L / Vp_L
+
+
+# Repeatability:
+# additive + permanent environmental variance
+#
+# CG is NOT included because it is not a permanent animal-specific effect.
+rep_L <- (Va_L + Vpe_L) / Vp_L
+
+
+# ======================================================================
+# 6. ORDINAL CATEGORY TRANSFORMATION
+# ======================================================================
+
+props <- counts / sum(counts)
+
+K <- length(props)
+
+if (length(codes) != K) {
+  stop("counts and codes must have the same length.")
+}
+
+
+# Cumulative proportions
+cum_props <- cumsum(props)
+
+
+# Thresholds
+taus_full <- c(
+  -Inf,
+  qnorm(cum_props[-K]),
+  Inf
+)
+
+taus <- taus_full[2:K]
+
+
+# Observed-scale mean
+muY <- sum(
+  props * codes
+)
+
+
+# Observed-scale phenotypic variance
+varY <- sum(
+  props * (codes - muY)^2
+)
+
+
+# Standard normal density at category boundaries
+phi_vals <- dnorm(taus_full)
+
+
+# Polychotomous slope
+b <- sum(
+  (codes - muY) *
+    (
+      phi_vals[-length(phi_vals)] -
+      phi_vals[-1]
+    )
+)
+
+b2 <- b^2
+
+
+# Liability -> observed h2/repeatability scaling factor
+scale_factor <- b2 / varY
+
+
+# ======================================================================
+# 7. OBSERVED-SCALE VARIANCE COMPONENTS
+# ======================================================================
+
+# Additive genetic contribution
+Va_obs <- b2 * (Va_L / Vp_L)
+
+
+# Permanent environmental contribution
+Vpe_obs <- b2 * (Vpe_L / Vp_L)
+
+
+# Contemporary-group contribution
+Vcg_obs <- b2 * (Vcg_L / Vp_L)
+
+
+# Residual liability contribution to observed variance
+Ve_liability_obs <- b2 * (Ve_L / Vp_L)
+
+
+# Variance introduced by categorization/discretization
+Vdiscretization <- varY - b2
+
+
+# Total residual observed variance
+#
+# = residual-liability contribution
+#   + discretization contribution
+Ve_obs <- Ve_liability_obs + Vdiscretization
+
+
+# Total observed phenotypic variance
+Vp_obs <- Va_obs + Vpe_obs + Vcg_obs + Ve_obs
+
+
+# ======================================================================
+# 8. OBSERVED-SCALE RATIOS
+# ======================================================================
+
+h2_obs <- Va_obs / varY
+
+pe_ratio_obs <- Vpe_obs / varY
+
+cg_ratio_obs <- Vcg_obs / varY
+
+e_ratio_obs <- Ve_obs / varY
+
+
+# Repeatability on observed scale
+rep_obs <- (Va_obs + Vpe_obs) / varY
+
+
+# ======================================================================
+# 9. INDEPENDENT TRANSFORMATION CHECKS
+# ======================================================================
+
+h2_obs_check <- h2_L * scale_factor
+
+rep_obs_check <- rep_L * scale_factor
+
+
+# ======================================================================
+# 10. LIABILITY-SCALE POSTERIOR RESULTS
+# ======================================================================
+
+liability_results <- rbind(
+
+  Additive_variance =
+    posterior_summary(Va_L, HPD_PROB),
+
+  PE_variance =
+    posterior_summary(Vpe_L, HPD_PROB),
+
+  CG_variance =
+    posterior_summary(Vcg_L, HPD_PROB),
+
+  Residual_variance =
+    posterior_summary(Ve_L, HPD_PROB),
+
+  Total_variance =
+    posterior_summary(Vp_L, HPD_PROB),
+
+  Heritability =
+    posterior_summary(h2_L, HPD_PROB),
+
+  PE_proportion =
+    posterior_summary(pe_ratio_L, HPD_PROB),
+
+  CG_proportion =
+    posterior_summary(cg_ratio_L, HPD_PROB),
+
+  Residual_proportion =
+    posterior_summary(e_ratio_L, HPD_PROB),
+
+  Repeatability =
+    posterior_summary(rep_L, HPD_PROB)
+)
+
+
+# ======================================================================
+# 11. OBSERVED-SCALE POSTERIOR RESULTS
+# ======================================================================
+
+observed_results <- rbind(
+
+  Additive_variance =
+    posterior_summary(Va_obs, HPD_PROB),
+
+  PE_variance =
+    posterior_summary(Vpe_obs, HPD_PROB),
+
+  CG_variance =
+    posterior_summary(Vcg_obs, HPD_PROB),
+
+  Residual_liability_contribution =
+    posterior_summary(Ve_liability_obs, HPD_PROB),
+
+  Discretization_variance =
+    posterior_summary(
+      rep(Vdiscretization, nrow(gibbs)),
+      HPD_PROB
+    ),
+
+  Residual_variance_total =
+    posterior_summary(Ve_obs, HPD_PROB),
+
+  Total_variance =
+    posterior_summary(Vp_obs, HPD_PROB),
+
+  Heritability =
+    posterior_summary(h2_obs, HPD_PROB),
+
+  PE_proportion =
+    posterior_summary(pe_ratio_obs, HPD_PROB),
+
+  CG_proportion =
+    posterior_summary(cg_ratio_obs, HPD_PROB),
+
+  Residual_proportion =
+    posterior_summary(e_ratio_obs, HPD_PROB),
+
+  Repeatability =
+    posterior_summary(rep_obs, HPD_PROB)
+)
+
+
+# ======================================================================
+# 12. SAMPLE-LEVEL RESULTS
+# ======================================================================
+
+posterior_samples <- data.frame(
+
+  Va_L = Va_L,
+  Vpe_L = Vpe_L,
+  Vcg_L = Vcg_L,
+  Ve_L = Ve_L,
+  Vp_L = Vp_L,
+
+  h2_L = h2_L,
+  pe_ratio_L = pe_ratio_L,
+  cg_ratio_L = cg_ratio_L,
+  e_ratio_L = e_ratio_L,
+  rep_L = rep_L,
+
+  Va_obs = Va_obs,
+  Vpe_obs = Vpe_obs,
+  Vcg_obs = Vcg_obs,
+
+  Ve_liability_obs = Ve_liability_obs,
+
+  Ve_obs = Ve_obs,
+  Vp_obs = Vp_obs,
+
+  h2_obs = h2_obs,
+  pe_ratio_obs = pe_ratio_obs,
+  cg_ratio_obs = cg_ratio_obs,
+  e_ratio_obs = e_ratio_obs,
+  rep_obs = rep_obs
+)
+
+
+# ======================================================================
+# 13. PRINT TRANSFORMATION INFORMATION
+# ======================================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("ORDINAL THRESHOLD MODEL\n")
+cat("============================================================\n\n")
+
+cat(
+  sprintf(
+    "Number of posterior samples: %d\n",
+    nrow(gibbs)
+  )
+)
+
+cat(
+  sprintf(
+    "Category counts: %s\n",
+    paste(counts, collapse = ", ")
+  )
+)
+
+cat(
+  sprintf(
+    "Category proportions: %s\n",
+    paste(round(props, 6), collapse = ", ")
+  )
+)
+
+cat(
+  sprintf(
+    "Thresholds: %s\n",
+    paste(round(taus, 6), collapse = ", ")
+  )
+)
+
+cat(
+  sprintf(
+    "Observed mean: %.6f\n",
+    muY
+  )
+)
+
+cat(
+  sprintf(
+    "Observed phenotypic variance: %.6f\n",
+    varY
+  )
+)
+
+cat(
+  sprintf(
+    "b: %.6f\n",
+    b
+  )
+)
+
+cat(
+  sprintf(
+    "b^2: %.6f\n",
+    b2
+  )
+)
+
+cat(
+  sprintf(
+    "Liability -> observed scale factor: %.6f\n",
+    scale_factor
+  )
+)
+
+
+# ======================================================================
+# 14. PRINT RESULTS
+# ======================================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("LIABILITY-SCALE POSTERIOR RESULTS\n")
+cat("============================================================\n\n")
+
+print(
+  round(
+    liability_results,
+    5
+  )
+)
+
+
+cat("\n")
+cat("============================================================\n")
+cat("OBSERVED-SCALE POSTERIOR RESULTS\n")
+cat("============================================================\n\n")
+
+print(
+  round(
+    observed_results,
+    5
+  )
+)
+
+
+# ======================================================================
+# 15. CHECKS
+# ======================================================================
+
+liability_sum <-
+  h2_L +
+  pe_ratio_L +
+  cg_ratio_L +
+  e_ratio_L
+
+
+cat("\n")
+cat("============================================================\n")
+cat("INTERNAL CHECKS\n")
+cat("============================================================\n\n")
+
+cat(
+  sprintf(
+    "Maximum liability proportion error: %.12f\n",
+    max(abs(liability_sum - 1))
+  )
+)
+
+cat(
+  sprintf(
+    "Maximum observed variance decomposition error: %.12f\n",
+    max(abs(Vp_obs - varY))
+  )
+)
+
+cat(
+  sprintf(
+    "Maximum h2 transformation difference: %.12f\n",
+    max(abs(h2_obs - h2_obs_check))
+  )
+)
+
+cat(
+  sprintf(
+    "Maximum repeatability transformation difference: %.12f\n",
+    max(abs(rep_obs - rep_obs_check))
+  )
+)
+
+
+# ======================================================================
+# 16. OPTIONAL OBJECTS AVAILABLE AFTER RUNNING
+# ======================================================================
+
+# liability_results
+# observed_results
+# posterior_samples
+#
+# Example:
+#
+# liability_results["Heritability", ]
+# observed_results["Heritability", ]
